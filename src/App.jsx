@@ -14,8 +14,8 @@ import {
   Search,
   Wifi,
   WifiOff,
-  AlertTriangle,
-  RefreshCw
+  Cloud,
+  Save
 } from 'lucide-react';
 
 // --- IMPORTACIONES DE FIREBASE ---
@@ -52,12 +52,12 @@ const DIA_VACIO = {
 export default function App() {
   // --- ESTADOS ---
   const [user, setUser] = useState(null);
-  const [authError, setAuthError] = useState(null);
   const [dbData, setDbData] = useState({});
   const [loading, setLoading] = useState(true);
   const [fecha, setFecha] = useState(new Date().toISOString().split('T')[0]);
   const [vista, setVista] = useState('diario');
   const [online, setOnline] = useState(navigator.onLine);
+  const [mensajeGuardado, setMensajeGuardado] = useState(''); // Nuevo: Feedback visual
 
   // Estados Temporales
   const [nuevaVenta, setNuevaVenta] = useState({ cliente: '', cantidad: '', tipo: 'A', precioUnitario: '', pagadoAElla: true, metodoPago: 'Efectivo' });
@@ -68,38 +68,16 @@ export default function App() {
   const [metodoPagoAbono, setMetodoPagoAbono] = useState('Efectivo');
 
   // --- 1. AUTENTICACIÓN ---
-  const conectarFirebase = async () => {
-    setLoading(true);
-    setAuthError(null);
-    try {
-      await signInAnonymously(auth);
-    } catch (error) {
-      console.error("Error auth:", error);
-      if (error.code === 'auth/configuration-not-found' || error.code === 'auth/admin-restricted-operation') {
-        setAuthError("⚠️ Esperando activación 'Anónimo' en Firebase...");
-      } else {
-        setAuthError(`Error: ${error.message}`);
-      }
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    conectarFirebase();
-    const unsubscribe = onAuthStateChanged(auth, (usuario) => {
-      setUser(usuario);
-      if (usuario) {
-        setAuthError(null); // Limpiar error si se conecta
-      }
-    });
+    signInAnonymously(auth).catch((error) => console.error("Error Auth:", error));
+    const unsubscribe = onAuthStateChanged(auth, setUser);
     return () => unsubscribe();
   }, []);
 
   // --- 2. SINCRONIZACIÓN DE DATOS ---
   useEffect(() => {
-    if (!user) return;
-    
-    const collectionRef = collection(db, 'registros_diarios');
+    // Usamos una colección nueva y limpia para asegurar que funcione desde hoy
+    const collectionRef = collection(db, 'registros_diarios_v2');
     const unsubscribe = onSnapshot(collectionRef, (snapshot) => {
       const newData = {};
       snapshot.forEach(doc => { newData[doc.id] = doc.data(); });
@@ -107,18 +85,16 @@ export default function App() {
       setLoading(false);
     }, (error) => {
       console.error("Error BD:", error);
-      // Si hay error de permisos, no bloquear la app, solo avisar
       if (error.code === 'permission-denied') {
-         setLoading(false);
+        alert("⚠️ ERROR CRÍTICO: La base de datos está bloqueada. Ve a Firebase Console -> Firestore Database -> Reglas y cámbialas a 'allow read, write: if true;'");
       }
     });
     return () => unsubscribe();
-  }, [user]);
+  }, []);
 
   // --- 3. MAGIA: ARRASTRE DE INVENTARIO ---
   useEffect(() => {
-    if (loading || !user) return;
-    
+    if (loading) return;
     const datosHoy = dbData[fecha];
     const esDiaNuevo = !datosHoy || (datosHoy.invInicial && Object.values(datosHoy.invInicial).every(v => v === 0));
 
@@ -127,28 +103,22 @@ export default function App() {
       const ayerObj = new Date(hoy);
       ayerObj.setDate(hoy.getDate() - 1);
       const ayer = ayerObj.toISOString().split('T')[0];
-
       const datosAyer = dbData[ayer];
 
       if (datosAyer && datosAyer.invFinalFisico) {
         const inventarioHeredado = {};
         let hayDatos = false;
-
         TIPOS_HUEVO.forEach(tipo => {
           const valorAyer = Number(datosAyer.invFinalFisico[tipo] || 0);
           inventarioHeredado[tipo] = valorAyer;
           if (valorAyer > 0) hayDatos = true;
         });
-
         if (hayDatos) {
-           guardarEnFirebase({ 
-             ...(datosHoy || DIA_VACIO),
-             invInicial: inventarioHeredado 
-           }, fecha);
+           guardarEnFirebase({ ...(datosHoy || DIA_VACIO), invInicial: inventarioHeredado }, fecha, false);
         }
       }
     }
-  }, [fecha, dbData, loading, user]);
+  }, [fecha, dbData, loading]);
 
   // Monitor de conexión
   useEffect(() => {
@@ -164,12 +134,19 @@ export default function App() {
   // --- FUNCIONES DE GUARDADO ---
   const datosDia = dbData[fecha] || DIA_VACIO;
 
-  const guardarEnFirebase = async (datosActualizados, fechaDestino = fecha) => {
-    if (!user) return;
+  const guardarEnFirebase = async (datosActualizados, fechaDestino = fecha, mostrarMensaje = true) => {
     try {
-      const docRef = doc(db, 'registros_diarios', fechaDestino);
+      const docRef = doc(db, 'registros_diarios_v2', fechaDestino);
       await setDoc(docRef, datosActualizados, { merge: true });
-    } catch (e) { console.error("Error guardando:", e); }
+      
+      if (mostrarMensaje) {
+        setMensajeGuardado('✅ Guardado en Nube');
+        setTimeout(() => setMensajeGuardado(''), 2000);
+      }
+    } catch (e) { 
+      console.error("Error guardando:", e);
+      setMensajeGuardado('❌ Error al Guardar (Revisar Internet/Reglas)'); 
+    }
   };
 
   const handleInvInicialChange = (tipo, valor) => {
@@ -193,7 +170,9 @@ export default function App() {
   };
 
   const borrarVenta = (id) => {
-    guardarEnFirebase({ ...datosDia, ventas: datosDia.ventas.filter(v => v.id !== id) });
+    if(confirm("¿Borrar esta venta?")) {
+      guardarEnFirebase({ ...datosDia, ventas: datosDia.ventas.filter(v => v.id !== id) });
+    }
   };
 
   const agregarGasto = () => {
@@ -204,11 +183,15 @@ export default function App() {
   };
 
   const borrarGasto = (id) => {
-    guardarEnFirebase({ ...datosDia, gastos: datosDia.gastos.filter(g => g.id !== id) });
+    if(confirm("¿Borrar este gasto?")) {
+      guardarEnFirebase({ ...datosDia, gastos: datosDia.gastos.filter(g => g.id !== id) });
+    }
   };
 
   const borrarCobroHoy = (cobro) => {
-    guardarEnFirebase({ ...datosDia, cobros: datosDia.cobros.filter(c => c.id !== cobro.id) });
+    if(confirm("¿Borrar este cobro?")) {
+      guardarEnFirebase({ ...datosDia, cobros: datosDia.cobros.filter(c => c.id !== cobro.id) });
+    }
   };
 
   // --- LÓGICA DE CARTERA ---
@@ -255,15 +238,11 @@ export default function App() {
 
   // --- CÁLCULOS VISUALES ---
   const calcularInvTeorico = (tipo) => (datosDia.invInicial?.[tipo] || 0) - (datosDia.ventas || []).filter(v => v.tipo === tipo).reduce((sum, v) => sum + v.cantidad, 0);
-  
   const ventasEfectivoHoy = (datosDia.ventas || []).filter(v => v.pagadoAElla && v.metodoPago === 'Efectivo').reduce((sum, v) => sum + v.total, 0);
   const ventasNequiHoy = (datosDia.ventas || []).filter(v => v.pagadoAElla && v.metodoPago === 'Nequi').reduce((sum, v) => sum + v.total, 0);
-  
   const cobrosEfectivoHoy = (datosDia.cobros || []).filter(c => c.metodoPago === 'Efectivo').reduce((sum, c) => sum + c.valor, 0);
   const cobrosNequiHoy = (datosDia.cobros || []).filter(c => c.metodoPago === 'Nequi').reduce((sum, c) => sum + c.valor, 0);
-
   const totalGastos = (datosDia.gastos || []).reduce((sum, g) => sum + g.valor, 0);
-  
   const efectivoEnMano = (ventasEfectivoHoy + cobrosEfectivoHoy) - totalGastos;
   const totalEnNequi = ventasNequiHoy + cobrosNequiHoy;
   const totalAConsignar = efectivoEnMano + totalEnNequi;
@@ -272,23 +251,19 @@ export default function App() {
     <div className="min-h-screen flex items-center justify-center bg-yellow-50 text-yellow-800 flex-col gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-yellow-600"></div>
       <p className="font-bold animate-pulse">Cargando Huevos Queens...</p>
-      {authError && (
-        <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 max-w-md mx-4 mt-4 rounded shadow-lg text-center">
-          <p className="font-bold mb-2">¡Casi listo!</p>
-          <p className="text-sm mb-3">Tu base de datos ya está configurada, pero necesitamos recargar para detectar el cambio.</p>
-          <button 
-            onClick={() => window.location.reload()} 
-            className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 mx-auto hover:bg-red-700 transition-colors"
-          >
-            <RefreshCw size={20} /> Recargar Página
-          </button>
-        </div>
-      )}
     </div>
   );
 
   return (
     <div className="min-h-screen bg-slate-100 p-2 md:p-4 font-sans text-slate-800">
+      
+      {/* NOTIFICACIÓN FLOTANTE */}
+      {mensajeGuardado && (
+        <div className={`fixed top-4 left-1/2 transform -translate-x-1/2 z-[100] px-6 py-3 rounded-full shadow-2xl font-bold text-white transition-all animate-bounce ${mensajeGuardado.includes('Error') ? 'bg-red-600' : 'bg-green-600'}`}>
+          {mensajeGuardado}
+        </div>
+      )}
+
       <div className="max-w-6xl mx-auto bg-white rounded-xl shadow-xl overflow-hidden min-h-[800px]">
         {/* HEADER */}
         <div className="bg-yellow-500 p-4 text-white shadow-md sticky top-0 z-50">
@@ -300,6 +275,7 @@ export default function App() {
               </h1>
               <p className="text-yellow-100 text-xs font-medium flex items-center gap-2">
                  {online ? <span className="flex items-center gap-1"><Wifi size={10}/> Online</span> : <span className="flex items-center gap-1 text-red-200"><WifiOff size={10}/> Offline</span>}
+                 {user ? <span className="flex items-center gap-1 bg-yellow-600 px-2 rounded-full"><Cloud size={10}/> Conectado</span> : <span>...</span>}
               </p>
             </div>
             
