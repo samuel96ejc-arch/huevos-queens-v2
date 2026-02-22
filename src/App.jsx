@@ -15,17 +15,19 @@ import {
   Wifi,
   WifiOff,
   Cloud,
-  Save
+  Save,
+  Lock,
+  LogOut
 } from 'lucide-react';
 
 // --- IMPORTACIONES DE FIREBASE ---
 import { initializeApp } from "firebase/app";
-import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "firebase/auth";
 import { getFirestore, doc, setDoc, collection, onSnapshot } from "firebase/firestore";
 
-// --- CONFIGURACIÓN DE FIREBASE ---
+// --- CONFIGURACIÓN DE FIREBASE (SEGURA) ---
 const firebaseConfig = {
-  apiKey: "AIzaSyDiWfZPVVDQqH4WB0ec1lfOU4w3BZ6Xrl0",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: "huevos-queens.firebaseapp.com",
   projectId: "huevos-queens",
   storageBucket: "huevos-queens.firebasestorage.app",
@@ -57,7 +59,7 @@ export default function App() {
   const [fecha, setFecha] = useState(new Date().toISOString().split('T')[0]);
   const [vista, setVista] = useState('diario');
   const [online, setOnline] = useState(navigator.onLine);
-  const [mensajeGuardado, setMensajeGuardado] = useState(''); // Nuevo: Feedback visual
+  const [mensajeGuardado, setMensajeGuardado] = useState('');
 
   // Estados Temporales
   const [nuevaVenta, setNuevaVenta] = useState({ cliente: '', cantidad: '', tipo: 'A', precioUnitario: '', pagadoAElla: true, metodoPago: 'Efectivo' });
@@ -67,34 +69,61 @@ export default function App() {
   const [deudorSeleccionado, setDeudorSeleccionado] = useState(null);
   const [metodoPagoAbono, setMetodoPagoAbono] = useState('Efectivo');
 
+  // Estados para Login
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
   // --- 1. AUTENTICACIÓN ---
   useEffect(() => {
-    signInAnonymously(auth).catch((error) => console.error("Error Auth:", error));
-    const unsubscribe = onAuthStateChanged(auth, setUser);
+    if (!auth) {
+        setLoading(false);
+        return;
+    }
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setLoading(false);
+    });
     return () => unsubscribe();
   }, []);
 
-  // --- 2. SINCRONIZACIÓN DE DATOS ---
+  const handleLogin = (e) => {
+    e.preventDefault();
+    setIsLoggingIn(true);
+    setLoginError('');
+    signInWithEmailAndPassword(auth, email, password)
+      .catch((error) => {
+        setLoginError("Correo o contraseña incorrectos");
+        setIsLoggingIn(false);
+      });
+  };
+
+  const handleLogout = () => {
+    signOut(auth);
+  };
+
+  // --- 2. SINCRONIZACIÓN DE DATOS (Solo si hay usuario logueado) ---
   useEffect(() => {
-    // Usamos una colección nueva y limpia para asegurar que funcione desde hoy
+    if (!user) return;
+    
     const collectionRef = collection(db, 'registros_diarios_v2');
     const unsubscribe = onSnapshot(collectionRef, (snapshot) => {
       const newData = {};
       snapshot.forEach(doc => { newData[doc.id] = doc.data(); });
       setDbData(newData);
-      setLoading(false);
     }, (error) => {
       console.error("Error BD:", error);
       if (error.code === 'permission-denied') {
-        alert("⚠️ ERROR CRÍTICO: La base de datos está bloqueada. Ve a Firebase Console -> Firestore Database -> Reglas y cámbialas a 'allow read, write: if true;'");
+        alert("⚠️ ERROR CRÍTICO: La base de datos está bloqueada. Verifica las reglas de Firestore.");
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [user]);
 
   // --- 3. MAGIA: ARRASTRE DE INVENTARIO ---
   useEffect(() => {
-    if (loading) return;
+    if (!user || loading) return;
     const datosHoy = dbData[fecha];
     const esDiaNuevo = !datosHoy || (datosHoy.invInicial && Object.values(datosHoy.invInicial).every(v => v === 0));
 
@@ -118,7 +147,7 @@ export default function App() {
         }
       }
     }
-  }, [fecha, dbData, loading]);
+  }, [fecha, dbData, loading, user]);
 
   // Monitor de conexión
   useEffect(() => {
@@ -135,6 +164,7 @@ export default function App() {
   const datosDia = dbData[fecha] || DIA_VACIO;
 
   const guardarEnFirebase = async (datosActualizados, fechaDestino = fecha, mostrarMensaje = true) => {
+    if (!user) return;
     try {
       const docRef = doc(db, 'registros_diarios_v2', fechaDestino);
       await setDoc(docRef, datosActualizados, { merge: true });
@@ -247,12 +277,47 @@ export default function App() {
   const totalEnNequi = ventasNequiHoy + cobrosNequiHoy;
   const totalAConsignar = efectivoEnMano + totalEnNequi;
 
+  // --- PANTALLAS ---
+
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-yellow-50 text-yellow-800 flex-col gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-yellow-600"></div>
       <p className="font-bold animate-pulse">Cargando Huevos Queens...</p>
     </div>
   );
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-yellow-500 via-amber-500 to-orange-600 flex items-center justify-center p-4 font-sans">
+        <div className="bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden">
+          <div className="bg-slate-800 p-8 text-center relative overflow-hidden">
+            <div className="absolute top-0 right-0 p-4 opacity-20"><Lock className="w-24 h-24 text-white" /></div>
+            <div className="w-20 h-20 bg-yellow-500 rounded-full flex items-center justify-center mx-auto shadow-lg mb-4 relative z-10 border-4 border-white">
+              <ClipboardList className="w-10 h-10 text-white"/>
+            </div>
+            <h1 className="text-2xl font-black text-white relative z-10 uppercase tracking-wide">Huevos Queens</h1>
+            <p className="text-yellow-400 text-sm mt-1 relative z-10 font-bold">Caja Diaria & Inventario</p>
+          </div>
+          <div className="p-8">
+            <form onSubmit={handleLogin} className="space-y-5">
+              <div>
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block mb-2">Correo Electrónico</label>
+                <input type="email" value={email} onChange={(e)=>setEmail(e.target.value)} required className="w-full bg-gray-50 border border-gray-200 p-3 rounded-xl focus:ring-2 focus:ring-yellow-500 outline-none text-gray-700 font-medium" placeholder="usuario@correo.com" />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block mb-2">Contraseña</label>
+                <input type="password" value={password} onChange={(e)=>setPassword(e.target.value)} required className="w-full bg-gray-50 border border-gray-200 p-3 rounded-xl focus:ring-2 focus:ring-yellow-500 outline-none text-gray-700 font-medium" placeholder="••••••••" />
+              </div>
+              {loginError && <p className="text-red-500 text-xs font-bold text-center bg-red-50 p-2 rounded-lg border border-red-100">{loginError}</p>}
+              <button type="submit" disabled={isLoggingIn} className="w-full bg-yellow-500 hover:bg-yellow-600 text-slate-900 font-black py-4 rounded-xl shadow-md transition-all mt-4">
+                {isLoggingIn ? 'Verificando...' : 'ENTRAR AL SISTEMA'}
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-100 p-2 md:p-4 font-sans text-slate-800">
@@ -268,25 +333,35 @@ export default function App() {
         {/* HEADER */}
         <div className="bg-yellow-500 p-4 text-white shadow-md sticky top-0 z-50">
           <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-            <div>
-              <h1 className="text-2xl font-bold flex items-center gap-2 text-white drop-shadow-md">
-                <ClipboardList className="h-6 w-6" />
-                Huevos Queens
-              </h1>
-              <p className="text-yellow-100 text-xs font-medium flex items-center gap-2">
-                 {online ? <span className="flex items-center gap-1"><Wifi size={10}/> Online</span> : <span className="flex items-center gap-1 text-red-200"><WifiOff size={10}/> Offline</span>}
-                 {user ? <span className="flex items-center gap-1 bg-yellow-600 px-2 rounded-full"><Cloud size={10}/> Conectado</span> : <span>...</span>}
-              </p>
+            <div className="flex items-center gap-4 w-full md:w-auto justify-between md:justify-start">
+              <div>
+                <h1 className="text-2xl font-bold flex items-center gap-2 text-white drop-shadow-md">
+                  <ClipboardList className="h-6 w-6" />
+                  Huevos Queens
+                </h1>
+                <p className="text-yellow-100 text-xs font-medium flex items-center gap-2 mt-1">
+                   {online ? <span className="flex items-center gap-1"><Wifi size={10}/> Online</span> : <span className="flex items-center gap-1 text-red-200"><WifiOff size={10}/> Offline</span>}
+                   {user && <span className="flex items-center gap-1 bg-yellow-600 px-2 rounded-full"><Cloud size={10}/> Conectado</span>}
+                </p>
+              </div>
+              <button onClick={handleLogout} className="md:hidden bg-slate-800 text-white p-2 rounded-full shadow hover:bg-slate-700">
+                  <LogOut className="w-4 h-4"/>
+              </button>
             </div>
             
-            <div className="flex gap-4 items-center bg-yellow-600 p-2 rounded-lg">
-                <label className="text-xs font-bold text-yellow-100 uppercase">FECHA:</label>
-                <input 
-                  type="date" 
-                  value={fecha} 
-                  onChange={(e) => setFecha(e.target.value)}
-                  className="bg-white text-slate-800 border-none rounded p-1 font-bold focus:ring-2 focus:ring-blue-300 shadow-inner cursor-pointer"
-                />
+            <div className="flex gap-4 items-center bg-yellow-600 p-2 rounded-lg w-full md:w-auto justify-between">
+                <div className="flex items-center gap-2">
+                    <label className="text-xs font-bold text-yellow-100 uppercase">FECHA:</label>
+                    <input 
+                      type="date" 
+                      value={fecha} 
+                      onChange={(e) => setFecha(e.target.value)}
+                      className="bg-white text-slate-800 border-none rounded p-1 font-bold focus:ring-2 focus:ring-blue-300 shadow-inner cursor-pointer"
+                    />
+                </div>
+                <button onClick={handleLogout} className="hidden md:flex items-center gap-2 bg-slate-800 text-white px-3 py-1 rounded-lg text-xs font-bold shadow hover:bg-slate-700">
+                  <LogOut className="w-4 h-4"/> Salir
+                </button>
             </div>
           </div>
 
