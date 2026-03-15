@@ -16,18 +16,17 @@ import {
   WifiOff,
   Cloud,
   Save,
-  Lock,
-  LogOut
+  Receipt
 } from 'lucide-react';
 
 // --- IMPORTACIONES DE FIREBASE ---
 import { initializeApp } from "firebase/app";
-import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "firebase/auth";
+import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { getFirestore, doc, setDoc, collection, onSnapshot } from "firebase/firestore";
 
-// --- CONFIGURACIÓN DE FIREBASE (SEGURA) ---
+// --- CONFIGURACIÓN DE FIREBASE ---
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  apiKey: "AIzaSyDiWfZPVVDQqH4WB0ec1lfOU4w3BZ6Xrl0",
   authDomain: "huevos-queens.firebaseapp.com",
   projectId: "huevos-queens",
   storageBucket: "huevos-queens.firebasestorage.app",
@@ -57,9 +56,9 @@ export default function App() {
   const [dbData, setDbData] = useState({});
   const [loading, setLoading] = useState(true);
   const [fecha, setFecha] = useState(new Date().toISOString().split('T')[0]);
-  const [vista, setVista] = useState('diario');
+  const [vista, setVista] = useState('diario'); // Puede ser: 'diario', 'cartera', 'gastos'
   const [online, setOnline] = useState(navigator.onLine);
-  const [mensajeGuardado, setMensajeGuardado] = useState('');
+  const [mensajeGuardado, setMensajeGuardado] = useState(''); 
 
   // Estados Temporales
   const [nuevaVenta, setNuevaVenta] = useState({ cliente: '', cantidad: '', tipo: 'A', precioUnitario: '', pagadoAElla: true, metodoPago: 'Efectivo' });
@@ -69,61 +68,33 @@ export default function App() {
   const [deudorSeleccionado, setDeudorSeleccionado] = useState(null);
   const [metodoPagoAbono, setMetodoPagoAbono] = useState('Efectivo');
 
-  // Estados para Login
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [loginError, setLoginError] = useState('');
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
-
   // --- 1. AUTENTICACIÓN ---
   useEffect(() => {
-    if (!auth) {
-        setLoading(false);
-        return;
-    }
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setLoading(false);
-    });
+    signInAnonymously(auth).catch((error) => console.error("Error Auth:", error));
+    const unsubscribe = onAuthStateChanged(auth, setUser);
     return () => unsubscribe();
   }, []);
 
-  const handleLogin = (e) => {
-    e.preventDefault();
-    setIsLoggingIn(true);
-    setLoginError('');
-    signInWithEmailAndPassword(auth, email, password)
-      .catch((error) => {
-        setLoginError("Correo o contraseña incorrectos");
-        setIsLoggingIn(false);
-      });
-  };
-
-  const handleLogout = () => {
-    signOut(auth);
-  };
-
-  // --- 2. SINCRONIZACIÓN DE DATOS (Solo si hay usuario logueado) ---
+  // --- 2. SINCRONIZACIÓN DE DATOS ---
   useEffect(() => {
-    if (!user) return;
-    
     const collectionRef = collection(db, 'registros_diarios_v2');
     const unsubscribe = onSnapshot(collectionRef, (snapshot) => {
       const newData = {};
       snapshot.forEach(doc => { newData[doc.id] = doc.data(); });
       setDbData(newData);
+      setLoading(false);
     }, (error) => {
       console.error("Error BD:", error);
       if (error.code === 'permission-denied') {
-        alert("⚠️ ERROR CRÍTICO: La base de datos está bloqueada. Verifica las reglas de Firestore.");
+        alert("⚠️ ERROR CRÍTICO: La base de datos está bloqueada. Revisa las reglas.");
       }
     });
     return () => unsubscribe();
-  }, [user]);
+  }, []);
 
   // --- 3. MAGIA: ARRASTRE DE INVENTARIO ---
   useEffect(() => {
-    if (!user || loading) return;
+    if (loading) return;
     const datosHoy = dbData[fecha];
     const esDiaNuevo = !datosHoy || (datosHoy.invInicial && Object.values(datosHoy.invInicial).every(v => v === 0));
 
@@ -147,7 +118,7 @@ export default function App() {
         }
       }
     }
-  }, [fecha, dbData, loading, user]);
+  }, [fecha, dbData, loading]);
 
   // Monitor de conexión
   useEffect(() => {
@@ -164,7 +135,6 @@ export default function App() {
   const datosDia = dbData[fecha] || DIA_VACIO;
 
   const guardarEnFirebase = async (datosActualizados, fechaDestino = fecha, mostrarMensaje = true) => {
-    if (!user) return;
     try {
       const docRef = doc(db, 'registros_diarios_v2', fechaDestino);
       await setDoc(docRef, datosActualizados, { merge: true });
@@ -266,18 +236,40 @@ export default function App() {
     setVista('diario');
   };
 
-  // --- CÁLCULOS VISUALES ---
+  // --- LÓGICA DE HISTORIAL DE GASTOS (NUEVO) ---
+  const historialGastos = useMemo(() => {
+    let lista = [];
+    let granTotal = 0;
+
+    // Ordenar fechas de la más reciente a la más antigua
+    const fechas = Object.keys(dbData).sort((a, b) => new Date(b) - new Date(a));
+
+    fechas.forEach(fechaKey => {
+      const dia = dbData[fechaKey];
+      if (dia.gastos && dia.gastos.length > 0) {
+        const totalDia = dia.gastos.reduce((sum, g) => sum + g.valor, 0);
+        granTotal += totalDia;
+        lista.push({
+          fecha: fechaKey,
+          gastos: dia.gastos,
+          totalDia: totalDia
+        });
+      }
+    });
+
+    return { lista, granTotal };
+  }, [dbData]);
+
+  // --- CÁLCULOS VISUALES DIARIOS ---
   const calcularInvTeorico = (tipo) => (datosDia.invInicial?.[tipo] || 0) - (datosDia.ventas || []).filter(v => v.tipo === tipo).reduce((sum, v) => sum + v.cantidad, 0);
   const ventasEfectivoHoy = (datosDia.ventas || []).filter(v => v.pagadoAElla && v.metodoPago === 'Efectivo').reduce((sum, v) => sum + v.total, 0);
   const ventasNequiHoy = (datosDia.ventas || []).filter(v => v.pagadoAElla && v.metodoPago === 'Nequi').reduce((sum, v) => sum + v.total, 0);
   const cobrosEfectivoHoy = (datosDia.cobros || []).filter(c => c.metodoPago === 'Efectivo').reduce((sum, c) => sum + c.valor, 0);
   const cobrosNequiHoy = (datosDia.cobros || []).filter(c => c.metodoPago === 'Nequi').reduce((sum, c) => sum + c.valor, 0);
-  const totalGastos = (datosDia.gastos || []).reduce((sum, g) => sum + g.valor, 0);
-  const efectivoEnMano = (ventasEfectivoHoy + cobrosEfectivoHoy) - totalGastos;
+  const totalGastosHoy = (datosDia.gastos || []).reduce((sum, g) => sum + g.valor, 0);
+  const efectivoEnMano = (ventasEfectivoHoy + cobrosEfectivoHoy) - totalGastosHoy;
   const totalEnNequi = ventasNequiHoy + cobrosNequiHoy;
   const totalAConsignar = efectivoEnMano + totalEnNequi;
-
-  // --- PANTALLAS ---
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-yellow-50 text-yellow-800 flex-col gap-4">
@@ -285,39 +277,6 @@ export default function App() {
       <p className="font-bold animate-pulse">Cargando Huevos Queens...</p>
     </div>
   );
-
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-yellow-500 via-amber-500 to-orange-600 flex items-center justify-center p-4 font-sans">
-        <div className="bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden">
-          <div className="bg-slate-800 p-8 text-center relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-20"><Lock className="w-24 h-24 text-white" /></div>
-            <div className="w-20 h-20 bg-yellow-500 rounded-full flex items-center justify-center mx-auto shadow-lg mb-4 relative z-10 border-4 border-white">
-              <ClipboardList className="w-10 h-10 text-white"/>
-            </div>
-            <h1 className="text-2xl font-black text-white relative z-10 uppercase tracking-wide">Huevos Queens</h1>
-            <p className="text-yellow-400 text-sm mt-1 relative z-10 font-bold">Caja Diaria & Inventario</p>
-          </div>
-          <div className="p-8">
-            <form onSubmit={handleLogin} className="space-y-5">
-              <div>
-                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block mb-2">Correo Electrónico</label>
-                <input type="email" value={email} onChange={(e)=>setEmail(e.target.value)} required className="w-full bg-gray-50 border border-gray-200 p-3 rounded-xl focus:ring-2 focus:ring-yellow-500 outline-none text-gray-700 font-medium" placeholder="usuario@correo.com" />
-              </div>
-              <div>
-                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block mb-2">Contraseña</label>
-                <input type="password" value={password} onChange={(e)=>setPassword(e.target.value)} required className="w-full bg-gray-50 border border-gray-200 p-3 rounded-xl focus:ring-2 focus:ring-yellow-500 outline-none text-gray-700 font-medium" placeholder="••••••••" />
-              </div>
-              {loginError && <p className="text-red-500 text-xs font-bold text-center bg-red-50 p-2 rounded-lg border border-red-100">{loginError}</p>}
-              <button type="submit" disabled={isLoggingIn} className="w-full bg-yellow-500 hover:bg-yellow-600 text-slate-900 font-black py-4 rounded-xl shadow-md transition-all mt-4">
-                {isLoggingIn ? 'Verificando...' : 'ENTRAR AL SISTEMA'}
-              </button>
-            </form>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-screen bg-slate-100 p-2 md:p-4 font-sans text-slate-800">
@@ -333,51 +292,88 @@ export default function App() {
         {/* HEADER */}
         <div className="bg-yellow-500 p-4 text-white shadow-md sticky top-0 z-50">
           <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-            <div className="flex items-center gap-4 w-full md:w-auto justify-between md:justify-start">
-              <div>
-                <h1 className="text-2xl font-bold flex items-center gap-2 text-white drop-shadow-md">
-                  <ClipboardList className="h-6 w-6" />
-                  Huevos Queens
-                </h1>
-                <p className="text-yellow-100 text-xs font-medium flex items-center gap-2 mt-1">
-                   {online ? <span className="flex items-center gap-1"><Wifi size={10}/> Online</span> : <span className="flex items-center gap-1 text-red-200"><WifiOff size={10}/> Offline</span>}
-                   {user && <span className="flex items-center gap-1 bg-yellow-600 px-2 rounded-full"><Cloud size={10}/> Conectado</span>}
-                </p>
-              </div>
-              <button onClick={handleLogout} className="md:hidden bg-slate-800 text-white p-2 rounded-full shadow hover:bg-slate-700">
-                  <LogOut className="w-4 h-4"/>
-              </button>
+            <div>
+              <h1 className="text-2xl font-bold flex items-center gap-2 text-white drop-shadow-md">
+                <ClipboardList className="h-6 w-6" />
+                Huevos Queens
+              </h1>
+              <p className="text-yellow-100 text-xs font-medium flex items-center gap-2">
+                 {online ? <span className="flex items-center gap-1"><Wifi size={10}/> Online</span> : <span className="flex items-center gap-1 text-red-200"><WifiOff size={10}/> Offline</span>}
+                 {user ? <span className="flex items-center gap-1 bg-yellow-600 px-2 rounded-full"><Cloud size={10}/> Conectado</span> : <span>...</span>}
+              </p>
             </div>
             
-            <div className="flex gap-4 items-center bg-yellow-600 p-2 rounded-lg w-full md:w-auto justify-between">
-                <div className="flex items-center gap-2">
-                    <label className="text-xs font-bold text-yellow-100 uppercase">FECHA:</label>
-                    <input 
-                      type="date" 
-                      value={fecha} 
-                      onChange={(e) => setFecha(e.target.value)}
-                      className="bg-white text-slate-800 border-none rounded p-1 font-bold focus:ring-2 focus:ring-blue-300 shadow-inner cursor-pointer"
-                    />
-                </div>
-                <button onClick={handleLogout} className="hidden md:flex items-center gap-2 bg-slate-800 text-white px-3 py-1 rounded-lg text-xs font-bold shadow hover:bg-slate-700">
-                  <LogOut className="w-4 h-4"/> Salir
-                </button>
+            <div className="flex gap-4 items-center bg-yellow-600 p-2 rounded-lg">
+                <label className="text-xs font-bold text-yellow-100 uppercase">FECHA:</label>
+                <input 
+                  type="date" 
+                  value={fecha} 
+                  onChange={(e) => setFecha(e.target.value)}
+                  className="bg-white text-slate-800 border-none rounded p-1 font-bold focus:ring-2 focus:ring-blue-300 shadow-inner cursor-pointer"
+                />
             </div>
           </div>
 
-          {/* NAVEGACIÓN */}
-          <div className="flex mt-4 gap-2">
-            <button onClick={() => setVista('diario')} className={`flex-1 py-2 rounded-t-lg font-bold flex items-center justify-center gap-2 transition-colors ${vista === 'diario' ? 'bg-white text-yellow-600' : 'bg-yellow-600 text-yellow-100 hover:bg-yellow-700'}`}>
-              <Calendar size={18} /> Caja del Día
+          {/* NAVEGACIÓN (AHORA CON 3 PESTAÑAS) */}
+          <div className="flex mt-4 gap-1 md:gap-2">
+            <button onClick={() => setVista('diario')} className={`flex-1 py-2 px-1 text-xs sm:text-sm md:text-base rounded-t-lg font-bold flex flex-col md:flex-row items-center justify-center gap-1 transition-colors ${vista === 'diario' ? 'bg-white text-yellow-600' : 'bg-yellow-600 text-yellow-100 hover:bg-yellow-700'}`}>
+              <Calendar size={18} /> Día
             </button>
-            <button onClick={() => setVista('cartera')} className={`flex-1 py-2 rounded-t-lg font-bold flex items-center justify-center gap-2 transition-colors ${vista === 'cartera' ? 'bg-white text-blue-600' : 'bg-blue-800 text-blue-100 hover:bg-blue-900'}`}>
-              <Users size={18} /> Cartera ({listaDeudores.length})
+            <button onClick={() => setVista('cartera')} className={`flex-1 py-2 px-1 text-xs sm:text-sm md:text-base rounded-t-lg font-bold flex flex-col md:flex-row items-center justify-center gap-1 transition-colors ${vista === 'cartera' ? 'bg-white text-blue-600' : 'bg-blue-800 text-blue-100 hover:bg-blue-900'}`}>
+              <Users size={18} /> Cartera
+            </button>
+            <button onClick={() => setVista('gastos')} className={`flex-1 py-2 px-1 text-xs sm:text-sm md:text-base rounded-t-lg font-bold flex flex-col md:flex-row items-center justify-center gap-1 transition-colors ${vista === 'gastos' ? 'bg-white text-red-600' : 'bg-red-800 text-red-100 hover:bg-red-900'}`}>
+              <Receipt size={18} /> Gastos
             </button>
           </div>
         </div>
 
         {/* --- CONTENIDO --- */}
         <div className="p-4 md:p-6">
+          
+          {/* PESTAÑA: HISTORIAL DE GASTOS (NUEVA) */}
+          {vista === 'gastos' && (
+            <div className="max-w-4xl mx-auto animate-in fade-in duration-300">
+               <div className="bg-red-50 border border-red-200 rounded-xl p-4 md:p-6 mb-6 flex flex-col sm:flex-row justify-between items-center gap-4">
+                 <div className="text-center sm:text-left">
+                   <h2 className="text-xl font-bold text-red-900 flex items-center justify-center sm:justify-start gap-2 mb-1"><Receipt className="h-6 w-6" /> Historial de Gastos</h2>
+                   <p className="text-sm text-red-700">Registro histórico de todas las salidas de dinero.</p>
+                 </div>
+                 <div className="bg-red-600 text-white p-3 rounded-lg shadow-md text-center sm:text-right w-full sm:w-auto">
+                    <p className="text-xs font-bold text-red-200 uppercase">Gran Total Acumulado</p>
+                    <p className="text-2xl md:text-3xl font-bold">${historialGastos.granTotal.toLocaleString()}</p>
+                 </div>
+               </div>
+
+               <div className="space-y-4">
+                 {historialGastos.lista.map(dia => (
+                   <div key={dia.fecha} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden transition-all hover:shadow-md hover:border-red-300">
+                      <div className="bg-gray-50 p-3 px-4 border-b border-gray-200 flex justify-between items-center">
+                         <h3 className="font-bold text-gray-700 flex items-center gap-2"><Calendar size={16} className="text-red-500"/> Fecha: {dia.fecha}</h3>
+                         <span className="font-bold text-red-600 text-lg">-${dia.totalDia.toLocaleString()}</span>
+                      </div>
+                      <ul className="p-4 space-y-3">
+                        {dia.gastos.map(g => (
+                           <li key={g.id} className="flex justify-between text-sm items-center border-b border-gray-50 pb-3 last:border-0 last:pb-0">
+                             <span className="text-gray-700 font-medium flex items-center gap-2 text-base"><Truck size={16} className="text-gray-400"/> {g.concepto}</span>
+                             <span className="font-bold text-gray-800 text-base">${g.valor.toLocaleString()}</span>
+                           </li>
+                        ))}
+                      </ul>
+                   </div>
+                 ))}
+                 {historialGastos.lista.length === 0 && (
+                   <div className="text-center py-12 bg-white rounded-xl border border-dashed border-gray-300">
+                     <Receipt size={48} className="mx-auto text-gray-300 mb-2"/>
+                     <p className="text-gray-500 font-medium">No hay gastos registrados aún.</p>
+                     <p className="text-sm text-gray-400">Los gastos que agregues en "Caja del Día" aparecerán aquí.</p>
+                   </div>
+                 )}
+               </div>
+            </div>
+          )}
+
+          {/* PESTAÑA: CARTERA */}
           {vista === 'cartera' && (
             <div className="max-w-3xl mx-auto animate-in fade-in duration-300">
                <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 mb-6 flex justify-between items-center">
@@ -433,6 +429,7 @@ export default function App() {
             </div>
           )}
 
+          {/* PESTAÑA: DIARIO */}
           {vista === 'diario' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-in fade-in duration-300">
               <div className="lg:col-span-4 space-y-6">
@@ -448,17 +445,20 @@ export default function App() {
                   </div>
                   <p className="text-xs text-blue-400 mt-2 text-center italic">* Si ayer sobraron huevos, se cargan aquí solos.</p>
                 </div>
+                
+                {/* CAJA DE GASTOS DIARIOS */}
                 <div className="bg-red-50 p-5 rounded-xl border border-red-200 shadow-sm">
                   <h2 className="font-bold text-red-900 mb-3 flex items-center gap-2 border-b border-red-200 pb-2"><Truck className="h-5 w-5" /> Gastos del Día</h2>
                   <div className="flex gap-2 mb-3">
-                    <input placeholder="Concepto" className="w-full p-2 border rounded text-sm" value={nuevoGasto.concepto} onChange={e => setNuevoGasto({...nuevoGasto, concepto: e.target.value})} />
-                    <input type="number" placeholder="$" className="w-24 p-2 border rounded text-sm" value={nuevoGasto.valor} onChange={e => setNuevoGasto({...nuevoGasto, valor: e.target.value})} />
+                    {/* AQUÍ ESTÁ LA CASILLA DE CONCEPTO QUE PEDISTE */}
+                    <input placeholder="Concepto (Ej: Gasolina)" className="w-full p-2 border rounded text-sm" value={nuevoGasto.concepto} onChange={e => setNuevoGasto({...nuevoGasto, concepto: e.target.value})} />
+                    <input type="number" placeholder="$ Valor" className="w-24 p-2 border rounded text-sm" value={nuevoGasto.valor} onChange={e => setNuevoGasto({...nuevoGasto, valor: e.target.value})} />
                     <button onClick={agregarGasto} className="bg-red-600 text-white p-2 rounded hover:bg-red-700 shadow-sm"><PlusCircle size={20} /></button>
                   </div>
                   <ul className="text-sm space-y-2">
                     {(datosDia.gastos || []).map(g => (
                       <li key={g.id} className="flex justify-between items-center bg-white p-2 rounded border border-red-100">
-                        <span className="text-gray-700">{g.concepto}</span>
+                        <span className="text-gray-700 font-medium">{g.concepto}</span>
                         <div className="flex items-center gap-2"><span className="font-bold text-red-600">-${g.valor.toLocaleString()}</span><button onClick={() => borrarGasto(g.id)} className="text-gray-400 hover:text-red-600"><Trash2 size={14}/></button></div>
                       </li>
                     ))}
@@ -581,7 +581,7 @@ export default function App() {
                         <div className="space-y-3 font-medium">
                           <div className="flex justify-between text-gray-300"><span>(+) Ventas Hoy (Efectivo):</span><span>${ventasEfectivoHoy.toLocaleString()}</span></div>
                           <div className="flex justify-between text-green-300 bg-green-900/30 p-2 rounded border border-green-900/50"><span>(+) Cobros Deudas (Efectivo):</span><span>+${cobrosEfectivoHoy.toLocaleString()}</span></div>
-                          <div className="flex justify-between text-red-300"><span>(-) Gastos:</span><span>-${totalGastos.toLocaleString()}</span></div>
+                          <div className="flex justify-between text-red-300"><span>(-) Gastos:</span><span>-${totalGastosHoy.toLocaleString()}</span></div>
                           <div className="border-t-2 border-slate-500 my-2 pt-2 flex justify-between font-bold text-2xl text-green-400"><span>= EFECTIVO EN MANO:</span><span>${efectivoEnMano.toLocaleString()}</span></div>
                           <div className="mt-6 pt-4 border-t border-dashed border-slate-500">
                             <div className="flex justify-between text-purple-300 text-sm mb-1"><span>(+) Plata en Nequi (Ventas):</span><span>${ventasNequiHoy.toLocaleString()}</span></div>
